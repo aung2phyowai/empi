@@ -4,20 +4,15 @@
  * See README.md and LICENCE for details.                 *
  **********************************************************/
 #include <algorithm>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <limits>
 #include <map>
 #include <fstream>
-#include <string>
-#include <vector>
-#include "classes.hpp"
+#include <iostream>
 #include "conf.hpp"
-#include "gabor.hpp"
+#include "decomposition.hpp"
+#include "envelope.hpp"
 #include "io.hpp"
-#include "mmp.hpp"
 #include "timer.hpp"
+#include "workspace.hpp"
 
 static std::vector<int> parseIntegerSubset(const std::string& string, int max) {
 	std::string scString;
@@ -47,9 +42,10 @@ static std::vector<int> parseIntegerSubset(const std::string& string, int max) {
 }
 
 static void empi(const char* configFilePath) {
-	std::unique_ptr<WorkspaceBuilder> builder;
+	std::unique_ptr<Dictionary> dictionary;
 	std::unique_ptr<Decomposition> decomposition;
 	std::unique_ptr<SignalReader> reader;
+	std::shared_ptr<EnvelopeGenerator> generator;
 	DecompositionSettings settings;
 
 	// legacy configuration START /////////////////////////////////////
@@ -60,14 +56,19 @@ static void empi(const char* configFilePath) {
 	if (energyError <= 0.0 || energyError >= 1.0) {
 		throw Exception("invalidEnergyErrorValue");
 	}
-	double scaleMin = legacyConfiguration.has("minAtomScale")
-		? atof(legacyConfiguration.at("minAtomScale").c_str()) : 0.0;
-	double scaleMax = legacyConfiguration.has("maxAtomScale")
-		? atof(legacyConfiguration.at("maxAtomScale").c_str()) : INFINITY;
-	double freqMax = legacyConfiguration.has("maxAtomFrequency")
-		? atof(legacyConfiguration.at("maxAtomFrequency").c_str()) : INFINITY;
+	double freqSampling = atof(legacyConfiguration.at("samplingFrequency").c_str());
+	if (freqSampling <= 0.0) {
+		throw Exception("invalidSamplingFrequency");
+	}
 
-	builder.reset( new GaborWorkspaceBuilder(energyError, scaleMin, scaleMax, freqMax) );
+	double scaleMin = legacyConfiguration.has("minAtomScale")
+		? atof(legacyConfiguration.at("minAtomScale").c_str()) * freqSampling : 0.0;
+	double scaleMax = legacyConfiguration.has("maxAtomScale")
+		? atof(legacyConfiguration.at("maxAtomScale").c_str()) * freqSampling : INFINITY;
+	double freqMax = legacyConfiguration.has("maxAtomFrequency")
+		? atof(legacyConfiguration.at("maxAtomFrequency").c_str()) / freqSampling : INFINITY;
+
+	generator.reset( new EnvelopeGeneratorTemplate<EnvelopeGauss>() );
 
 	settings.iterationMax = atoi(legacyConfiguration.at("maximalNumberOfIterations").c_str());
 	if (settings.iterationMax <= 0) {
@@ -101,16 +102,14 @@ static void empi(const char* configFilePath) {
 		reader.reset( new SignalReaderForWholeSignal(pathToSignalFile) );
 	}
 
-	reader->freqSampling = atof(legacyConfiguration.at("samplingFrequency").c_str());
-	if (reader->freqSampling <= 0.0) {
-		throw Exception("invalidSamplingFrequency");
-	}
+	reader->freqSampling = freqSampling;
 	reader->channelCount = atoi(legacyConfiguration.at("numberOfChannels").c_str());
 	if (reader->channelCount <= 0) {
 		throw Exception("invalidNumberOfChannels");
 	}
 	reader->selectedChannels = parseIntegerSubset(legacyConfiguration.at("selectedChannels"), reader->channelCount);
 
+	bool samePhase = false;
 	int channelCount = reader->selectedChannels.size();
 	int channelCountForBuilder = channelCount;
 	std::string typeOfMP = legacyConfiguration.at("MP");
@@ -120,9 +119,7 @@ static void empi(const char* configFilePath) {
 		channelCountForBuilder = 1;
 	} else if (typeOfMP == "mmp1") {
 		decomposition.reset( new Mmp1Decomposition );
-	} else if (typeOfMP == "mmp2") {
-		decomposition.reset( new Mmp2Decomposition );
-		channelCountForBuilder = 1;
+		samePhase = true;
 	} else if (typeOfMP == "mmp3") {
 		decomposition.reset( new Mmp3Decomposition );
 	} else {
@@ -151,10 +148,12 @@ static void empi(const char* configFilePath) {
 		if (!sampleCount) {
 			break;
 		}
-		if (!workspace) {
-			TIMER_START(prepareWorkspace);
-			workspace.reset( builder->prepareWorkspace(reader->freqSampling, channelCountForBuilder, sampleCount, decomposition->constraint) );
-			TIMER_STOP(prepareWorkspace);
+		if (!dictionary) {
+			TIMER_START(prepareDictionary);
+			dictionary.reset( new Dictionary(energyError, sampleCount) );
+			dictionary->addBlocks(generator.get(), scaleMin, scaleMax, freqMax);
+			workspace.reset( new Workspace(dictionary.get(), channelCountForBuilder, samePhase, true) );
+			TIMER_STOP(prepareDictionary);
 		}
 		std::cout << "START" << '\t' << ++epochProcessed << '\t' << channelCount << '\t' << settings.iterationMax << '\t' << 100*(1-settings.residualEnergy) << std::endl;
 		MultiChannelResult result = decomposition->compute(settings, workspace.get(), signal);
@@ -163,7 +162,12 @@ static void empi(const char* configFilePath) {
 	writer.close();
 	puts(" END");
 
-	PRINT_TIMERS;
+	PRINT_TIMER(subtractAtom);
+	PRINT_TIMER(subtractAtom_FFT);
+	PRINT_TIMER(subtractAtom_OTHER);
+	PRINT_TIMER(subtractAtom_COMPUTE);
+	PRINT_TIMER(subtractAtom_UPDATE);
+	PRINT_TIMER(subtractAtomFromSignal);
 }
 
 static void exception(const char* message) {
@@ -188,8 +192,6 @@ int main(int argc, char** argv) {
 		exception(e.what());
 	} catch (const std::bad_alloc& e) {
 		exception("insufficientMemory");
-	} catch (...) {
-		exception("internalError");
 	}
 	exit(EXIT_SUCCESS);
 }

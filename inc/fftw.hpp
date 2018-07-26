@@ -6,9 +6,13 @@
 #ifndef EMPI_FFTW_HPP
 #define	EMPI_FFTW_HPP
 
-#include <complex>
+#include <complex>  // should be included before fftw3.h
 #include <cstring>
 #include <fftw3.h>
+
+#include "base.hpp"
+
+//------------------------------------------------------------------------------
 
 /**
  * RAII-style wrapper for arrays allocated for FFTW.
@@ -36,6 +40,11 @@ public:
 		}
 	}
 
+	fftwArray(fftwArray&& source)
+	: length(source.length), pointer(source.pointer) {
+		source.pointer = nullptr;
+	}
+
 	/**
 	 * Destroy array by calling fftw_free on internal pointer.
      */
@@ -47,7 +56,7 @@ public:
 	 * Return an internal pointer to the underlying data.
      * @return  C-style pointer to data
      */
-	inline T* operator&() const {
+	inline T* data(void) {
 		return pointer;
 	}
 
@@ -86,72 +95,94 @@ public:
 	}
 };
 
+//------------------------------------------------------------------------------
+
+template<typename T>
+class fftwArrayView {
+	const int length;
+	const T* const pointer;
+
+public:
+	fftwArrayView(int length, const T* pointer)
+	: length(length), pointer(pointer)
+	{ }
+
+	/**
+	 * Return an internal pointer to the underlying data.
+     * @return  C-style pointer to data
+     */
+	inline const T* data(void) {
+		return pointer;
+	}
+
+	/**
+	 * Return i-th element of an array (counting from i=0).
+	 * No range-checking is performed.
+     * @param i  index of requested element
+     * @return constant reference to i-th value
+     */
+	inline const T& operator[](int i) const {
+		return pointer[i];
+	}
+
+	/**
+     * @return array's length (number of elements)
+     */
+	inline int size() const {
+		return length;
+	}
+};
+
+//------------------------------------------------------------------------------
+
 // convenience names for arrays allocated for FFTW
 typedef fftwArray<double> fftwDouble;
 typedef fftwArray<std::complex<double>> fftwComplex;
+typedef fftwArrayView<std::complex<double>> fftwComplexView;
+
+//------------------------------------------------------------------------------
 
 /**
  * RAII-style wrapper for FFTW plan structure.
  */
 class fftwPlan {
-	fftw_plan plan = nullptr;
+	std::shared_ptr<fftw_plan_s> plan;
 
 	fftwPlan(const fftwPlan&) =delete;
 	void operator=(const fftwPlan&) =delete;
 
 public:
 	/**
-	 * Create plan of given length for complex-to-complex transform.
-	 * All parameters are analogous to fftw_plan_dft_1d function.
-	 */
-	inline fftwPlan(int Nfft, fftwComplex& input, fftwComplex& output, int sign, unsigned flags) {
-		#ifdef _OPENMP
-		#pragma omp critical
-		#endif
-		{
-			plan = fftw_plan_dft_1d(Nfft, reinterpret_cast<fftw_complex*>(&input), reinterpret_cast<fftw_complex*>(&output), sign, flags);
-		}
-	}
-
-	/**
 	 * Create plan of given length for real-to-complex transform.
 	 * All parameters are analogous to fftw_plan_dft_r2c_1d specification.
 	 */
-	inline fftwPlan(int Nfft, fftwDouble& input, fftwComplex& output, unsigned flags) {
-		#ifdef _OPENMP
-		#pragma omp critical
-		#endif
-		{
-			plan = fftw_plan_dft_r2c_1d(Nfft, &input, reinterpret_cast<fftw_complex*>(&output), flags);
-		}
-	}
+	inline fftwPlan(int Nfft, real* input, complex* output, unsigned flags)
+	: plan(
+		fftw_plan_dft_r2c_1d(Nfft, input, reinterpret_cast<fftw_complex*>(output), flags),
+		fftw_destroy_plan
+	)
+	{ }
 
-	/**
-	 * Destroy plan by calling fftw_destroy_plan.
-     */
-	inline ~fftwPlan() {
-		#ifdef _OPENMP
-		#pragma omp critical
-		#endif
-		{
-			if (plan) fftw_destroy_plan(plan);
-		}
-	}
-
-	/**
-     * @return internal C-style type for plan
-     */
-	inline fftw_plan operator&() const {
-		return plan;
-	}
+	inline fftwPlan(fftwPlan&& source)
+	: plan(std::move(source.plan))
+	{ }
 
 	/**
 	 * Execute plan.
      */
 	inline void execute() const {
-		fftw_execute(plan);
+		fftw_execute(plan.get());
+	}
+
+	/**
+	 * Execute plan with different data arrays than it has been created for.
+     */
+	inline void execute(real* input, complex* output) const {
+		fftw_execute_dft_r2c(plan.get(), input, reinterpret_cast<fftw_complex*>(output));
 	}
 };
+
+//------------------------------------------------------------------------------
 
 /**
  * Return smallest integer power of 2 greater or equal than given value.

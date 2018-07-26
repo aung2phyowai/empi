@@ -4,6 +4,7 @@
  * See README.md and LICENCE for details.                 *
  **********************************************************/
 #include <fstream>
+
 #include "base.hpp"
 #include "conf.hpp"
 

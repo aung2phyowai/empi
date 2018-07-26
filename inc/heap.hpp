@@ -7,8 +7,7 @@
 #define	EMPI_HEAP_HPP
 
 #include <algorithm>
-#include <map>
-#include <stdexcept>
+#include <vector>
 
 template<typename V>
 struct HeapItem {
@@ -69,6 +68,15 @@ private:
 		#undef SWAP_WITH
 	}
 
+	template<typename F>
+	void _walk(value_t& min, F visitor, size_t i) {
+		if (i < size && heap[i] >= min) {
+			visitor(item_t{key_from_heap[i], heap[i]}, min);
+			_walk(min, visitor, 2*i+1);
+			_walk(min, visitor, 2*i+2);
+		}
+	}
+
 public:
 	Heap(const std::vector<value_t>& values) : size(values.size()), heap(values), heap_from_key(size), key_from_heap(size) {
 		init();
@@ -86,6 +94,12 @@ public:
 		size_t i = heap_from_key[key];
 		heap[i] = value;
 		_update(i, value, true);
+	}
+
+	template<typename F>
+	void walk(F visitor) {
+		value_t min = 0;
+		_walk(min, visitor, 0);
 	}
 
 	Heap(const Heap&) =delete;

@@ -3,22 +3,7 @@
  *   Enhanced Matching Pursuit Implementation (empi)      *
  * See README.md and LICENCE for details.                 *
  **********************************************************/
-#include <string>
-#include <sys/time.h>
-
 #include "timer.hpp"
-
-//----------------------------------------------------------------------
-
-SingleTimer::SingleTimer(void) {
-	gettimeofday(&start_, 0);
-}
-
-double SingleTimer::time(void) const {
-	struct timeval now;
-	gettimeofday(&now,0);
-	return (now.tv_usec - start_.tv_usec)*1.0e-6 + (now.tv_sec - start_.tv_sec);
-}
 
 //----------------------------------------------------------------------
 
@@ -26,7 +11,7 @@ Timer::Timer(void)
 { }
 
 void Timer::start(void) {
-	timer_.reset( new SingleTimer() );
+	start_ = clock();
 }
 
 double Timer::time(void) const {
@@ -34,12 +19,11 @@ double Timer::time(void) const {
 }
 
 void Timer::stop(void) {
-	if (timer_) {
-		time_ += timer_->time();
-	}
-	timer_.reset();
+	time_ += (clock() - start_) / static_cast<double>(CLOCKS_PER_SEC);
 }
 
 //----------------------------------------------------------------------
 
-std::map<std::string, Timer> timers;
+#ifndef NDEBUG
+Timer timers[TIMER_COUNT];
+#endif

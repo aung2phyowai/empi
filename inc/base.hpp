@@ -8,7 +8,6 @@
 
 #include <cmath>
 #include <complex>
-#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -21,16 +20,50 @@
 #define M_SQRT2 1.41421356237309504880
 #endif
 
-enum AtomType { ATOM_GABOR = 13 };
+//enum AtomType { ATOM_GABOR = 13 };
+//
+//struct Atom {
+//	AtomType type;
+//	std::vector<double> params;
+//};
 
-struct Atom {
-	AtomType type;
-	std::vector<double> params;
+typedef double real;
+typedef std::complex<real> complex;
+
+class DictionaryBlock;
+
+struct AtomParams {
+		const DictionaryBlock* block;
+		double scale;
+		double frequency;
+		double center;
 };
 
-typedef std::complex<double> complex;
-typedef std::vector<Atom> Atoms;
-typedef std::vector<Atoms> MultiChannelResult;
+/**
+ * Fitted atom can be represented as:
+ * g(n) = modulus · K · 1/√scale · f((n-n₀)/scale) · cos(…) = amplitude · f((n-n₀)/scale) · cos(…)
+ * where f(n) is an envelope function defined as amplitude=1
+ * while 1/√scale · f((n-n₀)/scale) is L²-normalized
+ * and K · 1/√scale · f((n-n₀)/scale) · cos(…) is L²-normalized as well.
+ */
+struct AtomFit {
+		double amplitude;
+		double modulus;
+		double phase;
+};
+
+struct Atom {
+		AtomParams params;
+		std::vector<AtomFit> fits;
+};
+
+struct AtomResult : public AtomParams, AtomFit {
+    AtomResult(const AtomParams& params, const AtomFit& fit)
+      : AtomParams(params), AtomFit(fit)
+    { }
+};
+
+typedef std::vector<std::vector<AtomResult>> MultiChannelResult;
 
 struct SingleSignal {
 	double freqSampling;
@@ -43,6 +76,18 @@ struct SingleSignal {
 			sum += samples[i] * samples[i];
 		}
 		return sum / freqSampling;
+	}
+
+	inline int size(void) const {
+		return samples.size();
+	}
+	
+	const double* data(void) const {
+		return samples.data();
+	}
+
+	inline double operator[](int index) const {
+		return samples[index];
 	}
 };
 
@@ -63,6 +108,10 @@ struct MultiSignal {
 
 	int getSampleCount() const {
 		return channels.empty() ? 0 : channels[0].samples.size();
+	}
+	
+	inline const SingleSignal& operator[](int channel) const {
+		return channels[channel];
 	}
 };
 

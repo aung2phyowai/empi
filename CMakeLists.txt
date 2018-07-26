@@ -32,6 +32,14 @@ if(NOT FFTW_LIBRARIES)
 	message(FATAL_ERROR "Required FFTW library has not been found!")
 endif()
 
+# GSL is now required
+find_path(GSL_INCLUDES fftw3.h)
+find_library(GSL_LIBRARY NAMES gsl)
+find_library(GSL_CBLAS_LIBRARY NAMES gslcblas)
+if(NOT GSL_LIBRARY OR NOT GSL_CBLAS_LIBRARY)
+	message(FATAL_ERROR "Required GNU Scientific Library has not been found!")
+endif()
+
 # OpenMP is optional
 find_package(OpenMP)
 if(OPENMP_FOUND)
@@ -63,7 +71,7 @@ elseif(CMAKE_COMPILER_IS_GNUCXX)
 endif()
 
 # linking it all
-target_link_libraries(empi ${FFTW_LIBRARIES})
+target_link_libraries(empi ${FFTW_LIBRARIES} ${GSL_LIBRARY} ${GSL_CBLAS_LIBRARY})
 install(TARGETS empi RUNTIME DESTINATION bin)
 
 if(UNIX)

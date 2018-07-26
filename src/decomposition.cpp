@@ -3,23 +3,10 @@
  *   Enhanced Matching Pursuit Implementation (empi)      *
  * See README.md and LICENCE for details.                 *
  **********************************************************/
-#include <algorithm>
-#include <cstdio>
-#include <memory>
-#include "classes.hpp"
-#include "gabor.hpp"
+#include <iostream>
+
+#include "decomposition.hpp"
 #include "timer.hpp"
-
-//------------------------------------------------------------------------------
-
-void Workspace::subtractAtomFromSignal(Atom& atom, SingleSignal& signal, bool fit) {
-	switch (atom.type) {
-		case ATOM_GABOR:
-			return GaborWorkspace::subtractAtomFromSignal(atom, signal, fit);
-		default:
-			throw Exception("invalidAtomGenerated");
-	}
-}
 
 //------------------------------------------------------------------------------
 
@@ -48,20 +35,18 @@ MultiChannelResult Decomposition::compute(const DecompositionSettings& settings,
 			<< std::endl;
 
 		TIMER_START(findBestMatch);
-		Atoms bestMatches = workspace->findBestMatch();
+		Atom bestMatch = workspace->findBestMatch(residue);
 		TIMER_STOP(findBestMatch);
 
 		for (int c=0; c<channelCount; ++c) {
-			result[c].push_back(bestMatches[c]);
+      result[c].push_back(AtomResult(bestMatch.params, bestMatch.fits[c]));
 		}
 		if (iteration == settings.iterationMax) {
 			break;
 		}
 
 		TIMER_START(subtractAtom);
-		for (int c=0; c<channelCount; ++c) {
-			workspace->subtractAtom(bestMatches[c], residue.channels[c], c);
-		}
+		workspace->subtractAtom(bestMatch, residue);
 		TIMER_STOP(subtractAtom);
 
 		residueEnergy = residue.computeEnergy();
@@ -85,3 +70,5 @@ MultiChannelResult SmpDecomposition::compute(const DecompositionSettings& settin
 	}
 	return result;
 }
+
+//------------------------------------------------------------------------------

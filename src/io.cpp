@@ -128,7 +128,7 @@ void BookWriter::write(int epochNumber, const MultiSignal& signal, const MultiCh
 	fwrite(&headerData, sizeof headerData, 1, file);
 
 	std::vector<float> sampleBuffer(N);
-	std::vector<float> paramsBuffer;
+	std::vector<float> paramsBuffer(6);
 	for (int c=0; c<C; ++c) {
 		setBE(headerSignal.channelNumber, c+1);
 		setBE(headerSignal.len, sizeof headerSignal.channelNumber + sizeof(float) * N);
@@ -141,17 +141,19 @@ void BookWriter::write(int epochNumber, const MultiSignal& signal, const MultiCh
 		long headerAtomsPosition = ftell(file);
 		setBE(headerAtoms.channelNumber, c+1);
 		fwrite(&headerAtoms, sizeof headerAtoms, 1, file);
-		for (const Atom& atom : result[c]) {
-			const size_t P = atom.params.size();
-			setBE(headerAtom.len, sizeof(float) * P);
-			setBE(headerAtom.type, atom.type);
-			fwrite(&headerAtom, sizeof headerAtom, 1, file);
-			paramsBuffer.resize(atom.params.size());
-			for (size_t p=0; p<P; ++p) {
-				setBE(paramsBuffer[p], atom.params[p]);
-			}
-			fwrite(paramsBuffer.data(), sizeof(float), P, file);
-		}
+    const size_t P = 6;
+    for (const AtomResult& atom : result[c]) {
+      setBE(paramsBuffer[0], atom.modulus);
+      setBE(paramsBuffer[1], atom.amplitude);
+      setBE(paramsBuffer[2], atom.center);
+      setBE(paramsBuffer[3], atom.scale);
+      setBE(paramsBuffer[4], atom.frequency*2.0);
+      setBE(paramsBuffer[5], atom.phase);
+      setBE(headerAtom.len, sizeof(float) * P);
+      setBE(headerAtom.type, 13);
+      fwrite(&headerAtom, sizeof headerAtom, 1, file);
+      fwrite(paramsBuffer.data(), sizeof(float), P, file);
+    }
 
 		long currentPosition = ftell(file);
 		fseek(file, headerAtomsPosition, SEEK_SET);

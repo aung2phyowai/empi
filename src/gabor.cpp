@@ -3,272 +3,8 @@
  *   Enhanced Matching Pursuit Implementation (empi)      *
  * See README.md and LICENCE for details.                 *
  **********************************************************/
-#include <algorithm>
-#include "gabor.hpp"
-#include "timer.hpp"
 
-/**
- * Reconstructed half-width of the Gaussian envelope,
- * in units of scale parameter (s).
- */
-const double GAUSS_HALF_WIDTH = 3.0;
-
-/**
- * Minimum scale parameter for Gabor atoms, in number of samples.
- */
-const double MIN_SCALE_IN_SAMPLES = 2.0;
-
-/**
- * If the scalar product between two normalized Gabor atoms is smaller
- * than this value, the atoms are classified as orthogonal.
- */
-const double ORTHOGONALITY = 1.0e-8;
-
-/**
- * Multiply given array by discretely sampled Gabor function,
- * i.e. transform x[t] := x[t] g[t], where g[t] = exp(−π(t-t₀)²/s²).
- *
- * @param buffer  array values x[0], x[Δt], x[2Δt], ...
- * @param N       length of the array
- * @param step    sampling step Δt (inverse of sampling frequency)
- * @param center  center t₀ of Gabor function
- * @param width   width s of Gabor function
- */
-template<typename T>
-static void gaussize(T* const __restrict buffer, const int N, double step, double center, double width) {
-	const double w = std::sqrt(M_PI) / width;
-	const double a = w * step;
-	const double b = w * center;
-	for (int i=0; i<N; ++i) {
-		const double x_width = a * i - b;
-		buffer[i] *= std::exp(-x_width * x_width);
-	}
-}
-
-//------------------------------------------------------------------------------
-
-GaborComputer::GaborComputer(const GaborWorkspaceMap* map, int fIndex) :
-	map(map), fIndex(fIndex),
-	normComplex(std::sqrt(M_SQRT2 / map->s)),
-	freqNyquist(0.5 * map->freqSampling),
-	f(map->f(fIndex)),
-	isHighFreq(f > 0.5 * freqNyquist),
-	f4Norm(isHighFreq ? (freqNyquist - f) : f),
-	expFactor(std::exp(-2*M_PI*map->s*map->s*f4Norm*f4Norm))
-{ }
-
-double GaborComputer::compute(int tIndex, std::vector<complex>& buffer) {
-	const double t = map->t(tIndex);
-	for (int cIndex=0; cIndex<map->cCount; ++cIndex) {
-		buffer[cIndex] = map->value(cIndex, fIndex, tIndex);
-	}
-	if (map->constraint && !isHighFreq) {
-		(*map->constraint)(buffer);
-	}
-	double square = 0.0;
-	for (int cIndex=0; cIndex<map->cCount; ++cIndex) {
-		double phase = std::arg(buffer[cIndex]);
-		double phase4Norm = isHighFreq ? (2*M_PI*freqNyquist*t - phase) : phase;
-		double normReal = M_SQRT2 * normComplex / std::sqrt(1.0 + std::cos(2*phase4Norm) * expFactor);
-		double moduli = std::abs(buffer[cIndex]) * normReal * std::sqrt(map->freqSampling);
-		square += moduli * moduli;
-	}
-	return square;
-}
-
-//------------------------------------------------------------------------------
-
-GaborProductEstimator::GaborProductEstimator(double s1, double s2) :
-s12(s1*s1), s22(s2*s2), A(s12 + s22),
-part(M_SQRT2 * std::sqrt(s1 * s2 / A))
-{ }
-
-double GaborProductEstimator::estimate(double t1, double t2) const {
-	double dt = t1 - t2;
-	return part * std::exp(-M_PI/A * dt * dt);
-}
-
-//------------------------------------------------------------------------------
-
-void GaborWorkspace::compute(const MultiSignal& signal) {
-	const int count = static_cast<int>(maps.size());
-	#ifdef _OPENMP
-	#pragma omp parallel for schedule(dynamic,1)
-	#endif
-	for (int i=0; i<count; ++i) {
-		maps[i]->compute(signal);
-	}
-}
-
-Atoms GaborWorkspace::findBestMatch(void) const {
-	TimeFreqMapValue best{nullptr, 0, 0, 0.0};
-
-	const int mapCount = maps.size();
-	#pragma omp parallel
-	{
-		TimeFreqMapValue bestPerThread{nullptr, 0, 0, 0.0};
-
-		#pragma omp for schedule(dynamic,1)
-		for (int i=0; i<mapCount; ++i) {
-			TimeFreqValue peak = maps[i]->max();
-			if (peak.value > bestPerThread.value) {
-				bestPerThread = TimeFreqMapValue{maps[i], peak.fIndex, peak.tIndex, peak.value};
-			}
-		}
-
-		#pragma omp critical
-		{
-			if (bestPerThread.value > best.value) {
-				best = bestPerThread;
-			}
-		}
-	}
-	if (!best.map) {
-		throw Exception("energyMapIsEmpty");
-	}
-	GaborComputer updater(best.map.get(), best.fIndex);
-	std::vector<complex> values(best.map->cCount);
-	updater.compute(best.tIndex, values);
-
-	Atoms atomsBest(best.map->cCount);
-	for (int cIndex=0; cIndex<best.map->cCount; ++cIndex) {
-		double phase = std::arg(values[cIndex]);
-		double phase4Norm = updater.isHighFreq ? (2*M_PI*updater.freqNyquist*best.map->t(best.tIndex) - phase) : phase;
-		double normReal = M_SQRT2 * updater.normComplex / std::sqrt(1.0 + std::cos(2*phase4Norm) * updater.expFactor);
-		double modulus = std::abs(values[cIndex]) * normReal * std::sqrt(freqSampling);
-		double amplitude = std::abs(values[cIndex]) * normReal * normReal;
-
-		atomsBest[cIndex].type = ATOM_GABOR;
-		atomsBest[cIndex].params.resize(6);
-		atomsBest[cIndex].params[0] = modulus;
-		atomsBest[cIndex].params[1] = amplitude;
-		atomsBest[cIndex].params[2] = best.map->t(best.tIndex) * freqSampling;
-		atomsBest[cIndex].params[3] = best.map->s * freqSampling;
-		atomsBest[cIndex].params[4] = updater.f * 2.0 / freqSampling;
-		atomsBest[cIndex].params[5] = phase;
-	}
-	return atomsBest;
-}
-
-size_t GaborWorkspace::getAtomCount(void) const {
-	size_t atomCount = 0;
-	for (auto map : maps) {
-		atomCount += map->atomCount;
-	}
-	return atomCount;
-}
-
-void GaborWorkspace::subtractAtomFromSignal(Atom& atom, SingleSignal& signal, bool fit) {
-	const double sA = atom.params[3] / signal.freqSampling;
-	const double fA = atom.params[4] * signal.freqSampling / 2.0;
-	const double tA = atom.params[2] / signal.freqSampling;
-
-	const double amplitude = fit ? 1.0 : atom.params[1];
-	const double omega = 2.0 * M_PI * fA;
-	const double phase = atom.params[5];
-
-	const long N = signal.samples.size();
-	const double hwGabor = GAUSS_HALF_WIDTH * sA;
-	// type casts are safe since we know signal length fits in int
-	int iL = static_cast<int>( std::max(0L, std::lrint((tA - hwGabor) * signal.freqSampling)) );
-	int iR = static_cast<int>( std::min(N-1, std::lrint((tA + hwGabor) * signal.freqSampling)) );
-	const int Nw = 1 + iR - iL;
-	std::vector<double> waveform(Nw);
-	for (int i=0; i<Nw; ++i) {
-		double t = (i+iL) / signal.freqSampling - tA;
-		waveform[i] = amplitude * std::cos(omega * t + phase);
-	}
-	gaussize(waveform.data(), Nw, 1.0/signal.freqSampling, tA-iL/signal.freqSampling, sA);
-
-	if (fit) {
-		double norm2 = 0.0;
-		for (int i=0; i<Nw; ++i) {
-			norm2 += waveform[i] * waveform[i];
-		}
-		double norm = std::sqrt(norm2);
-		for (int i=0; i<Nw; ++i) {
-			waveform[i] /= norm;
-		}
-		double modulus = 0.0;
-		for (int i=0; i<Nw; ++i) {
-			modulus += waveform[i] * signal.samples[iL+i];
-		}
-		for (int i=0; i<Nw; ++i) {
-			waveform[i] *= modulus;
-		}
-		atom.params[0] = modulus;
-		atom.params[1] = modulus / norm;
-	}
-	for (int i=0; i<Nw; ++i) {
-		signal.samples[iL+i] -= waveform[i];
-	}
-}
-
-void GaborWorkspace::subtractAtom(const Atom& atom, SingleSignal& signal, int channel) {
-	const double sA = atom.params[3] / signal.freqSampling;
-	const double tA = atom.params[2] / signal.freqSampling;
-
-	TIMER_START(subtractAtomFromSignal);
-	GaborWorkspace::subtractAtomFromSignal(const_cast<Atom&>(atom), signal, false);
-	TIMER_STOP(subtractAtomFromSignal);
-
-	const int count = maps.size();
-	#ifdef _OPENMP
-	#pragma omp parallel for schedule(dynamic,1)
-	#endif
-	for (int i=0; i<count; ++i) {
-		GaborWorkspaceMap& map = *maps[i];
-		GaborProductEstimator estimator(sA, map.s);
-		if (estimator.part >= ORTHOGONALITY) {
-			for (int tIndex=0; tIndex<map.tCount; ++tIndex) {
-				if (estimator.estimate(tA, map.t(tIndex)) >= ORTHOGONALITY) {
-					map.compute(signal, channel, tIndex);
-				}
-			}
-		}
-	}
-}
-
-//------------------------------------------------------------------------------
-
-Workspace* GaborWorkspaceBuilder::prepareWorkspace(double freqSampling, int channelCount, int sampleCount, MultichannelConstraint constraint) const {
-	double scaleMin = std::max(this->scaleMin, MIN_SCALE_IN_SAMPLES / freqSampling);
-	double scaleMax = std::min(this->scaleMax, sampleCount / freqSampling);
-	double root = std::sqrt(-2.0/M_PI * std::log(1.0-energyError));
-	double aDenomSqrt = 1.0 - energyError;
-	double aNominPart = energyError*(2.0-energyError)*(energyError*energyError-2*energyError+2);
-	double a = (1.0 + std::sqrt(aNominPart)) / (aDenomSqrt * aDenomSqrt);
-
-	const double tMax = (sampleCount-1) / freqSampling;
-
-	std::vector<std::shared_ptr<GaborWorkspaceMap>> maps;
-	int count = 0;
-	for (double s=scaleMin; s<=scaleMax; s*=a) {
-		const double dt = root * s;
-		const double df = root / s;
-		const double hwGabor = GAUSS_HALF_WIDTH * s;
-
-		const long Ngauss = std::lrint(2.0 * hwGabor * freqSampling - 0.5) + 1;
-
-		const long Nfft = fftwRound( std::max(Ngauss, std::lrint(freqSampling/df + 0.5)) );
-		const long tCount = std::lrint(tMax/dt - 0.5) + 1;
-		if (std::max(Nfft, tCount) > static_cast<long>(std::numeric_limits<int>::max())) {
-			throw Exception("signalFileIsTooLongForThisDecomposition");
-		}
-		long fCount = Nfft / 2 + 1;
-		if (std::isfinite(freqMax) && freqMax > 0) {
-			fCount = std::min(fCount, std::lrint(freqMax/df - 0.5) + 1);
-		}
-
-		maps.push_back(std::make_shared<GaborWorkspaceMap>(s, static_cast<int>(Nfft), static_cast<int>(fCount), static_cast<int>(tCount), freqSampling, tMax, channelCount, constraint));
-		++count;
-	}
-
-	return new GaborWorkspace(freqSampling, std::move(maps));
-}
-
-//------------------------------------------------------------------------------
-
+/*
 GaborWorkspaceMap::GaborWorkspaceMap(double s, int Nfft, int fCount, int tCount, double freqSampling, double tMax, int channelCount, MultichannelConstraint constraint)
 :	TimeFreqMap<complex>(channelCount, fCount, tCount),
 	Nfft(Nfft), input(Nfft), output(Nfft/2+1),
@@ -305,7 +41,7 @@ void GaborWorkspaceMap::compute(const SingleSignal& signal, int cIndex, int tInd
 	for (int i=iL; i<=iR; ++i) {
 		input[i-iL] = signal.samples[i];
 	}
-	gaussize(&input, iR-iL+1, 1.0/signal.freqSampling, t0fixed, s);
+	gaussize(input.data(), iR-iL+1, 1.0/signal.freqSampling, t0fixed, s);
 	plan.execute();
 
 	const double norm = 1.0 / signal.freqSampling;
@@ -318,15 +54,38 @@ void GaborWorkspaceMap::compute(const SingleSignal& signal, int cIndex, int tInd
 	}
 }
 
-TimeFreqValue GaborWorkspaceMap::max(void) {
+complex GaborWorkspaceMap::compute(double s0, double f0, double t0, const SingleSignal& signal) const {
+	const long N = signal.samples.size();
+	const double hwGabor = GAUSS_HALF_WIDTH * s0;
+	// type casts are safe since we know signal length fits in int
+	int iL = static_cast<int>( std::max(0L, std::lrint((t0 - hwGabor) * signal.freqSampling)) );
+	int iR = static_cast<int>( std::min(N-1, std::lrint((t0 + hwGabor) * signal.freqSampling)) );
+	const double t0fixed = t0 - iL / signal.freqSampling;
+
+	input.zero();
+	for (int i=iL; i<=iR; ++i) {
+		input[i-iL] = signal.samples[i];
+	}
+	gaussize(input.data(), iR-iL+1, 1.0/signal.freqSampling, t0fixed, s0);
+
+	const double norm = 1.0 / signal.freqSampling;
+	const double mult = 2 * M_PI * t0fixed;
+	double fIndex = input.size() * f0 / signal.freqSampling;
+	complex out = dftSingleValue(input, fIndex);
+	return norm * out * std::polar(1.0, f0 * mult);
+}
+
+TimeFreqValue GaborWorkspaceMap::max(const MultiSignal& signal) {
 	if (!index) {
 		throw Exception("internalLogicError");
 	}
-	return index->max();
+	return index->max(signal);
 }
+*/
 
 //------------------------------------------------------------------------------
 
+/*
 void GaborWorkspaceIndex::update(void) {
 	for (int fIndex=0; fIndex<map->fCount; ++fIndex) {
 		GaborComputer updater(map, fIndex);
@@ -359,12 +118,106 @@ void GaborWorkspaceIndex::mark(int tIndex) {
 	tIndexNeedUpdateFlag = true;
 }
 
-TimeFreqValue GaborWorkspaceIndex::max(void) {
+#include <gsl/gsl_multimin.h>
+#include <gsl/gsl_vector.h>
+
+struct minParams {
+	const GaborWorkspaceMap* map;
+	const MultiSignal* signal;
+	std::vector<complex>* buffer;
+};
+
+struct minResult {
+	double s, f, t;
+	double value;
+};
+
+double minFunc(const gsl_vector* x, void* params) {
+	double s = x->data[0];
+	double f = x->data[1];
+	double t = x->data[2];
+	minParams* p = static_cast<minParams*>(params);
+	const GaborWorkspaceMap* map = p->map;
+	const MultiSignal* signal = p->signal;
+	if (f < 0 || s <= 0 || t < 0 || t >= signal->getSampleCount() / signal->getFreqSampling()) return 0.0;
+	std::vector<complex>& buffer = *p->buffer;
+
+	for (int c=0; c<map->cCount; ++c) {
+		buffer[c] = map->compute(s, f, t, signal->channels[c]);
+	}
+	double freqNyquist = 0.5 * map->freqSampling;
+	bool isHighFreq = f > 0.5 * freqNyquist;
+	double normComplex = std::sqrt(M_SQRT2 / s);
+	double f4Norm = isHighFreq ? (freqNyquist - f) : f;
+	double expFactor = std::exp(-2*M_PI*s*s*f4Norm*f4Norm);
+	if (map->constraint && !isHighFreq) {
+		(*map->constraint)(buffer);
+	}
+	double square = 0.0;
+	for (int cIndex=0; cIndex<map->cCount; ++cIndex) {
+		double phase = std::arg(buffer[cIndex]);
+		double phase4Norm = isHighFreq ? (2*M_PI*freqNyquist*t - phase) : phase;
+		double normReal = M_SQRT2 * normComplex / std::sqrt(1.0 + std::cos(2*phase4Norm) * expFactor);
+		double moduli = std::abs(buffer[cIndex]) * normReal * std::sqrt(map->freqSampling);
+		square += moduli * moduli;
+	}
+	return -square;
+}
+
+TimeFreqValue GaborWorkspaceIndex::max(const MultiSignal& signal) {
 	if (tIndexNeedUpdateFlag) {
+		printf("UPDATING!\n");
 		update();
 	}
-	HeapItem<double> peak = heap->peek();
+	HeapItem<double> peak;
+	printf("s = %lf\n", map->s);
+	
+	gsl_vector* v = gsl_vector_alloc(3);
+	gsl_vector* step = gsl_vector_alloc(3);
+	// TODO accurate step size
+	step->data[0] = 0.1 * map->s;
+	step->data[1] = map->f(1) - map->f(0);
+	step->data[2] = map->t(1) - map->t(0);
+	minParams params{map, &signal, &buffer};
+	gsl_multimin_fminimizer* minimizer = gsl_multimin_fminimizer_alloc(gsl_multimin_fminimizer_nmsimplex, 3);
+	gsl_multimin_function func;
+	func.f = minFunc;
+	func.n = 3;
+	func.params = &params;
+	std::vector<complex> buffer(map->cCount);
+	heap->walk([this, &signal, &peak, &buffer, &func, v, step, minimizer](HeapItem<double> item, double& min) {
+		v->data[0] = map->s;
+		v->data[1] = map->f(item.key / map->tCount);
+		v->data[2] = map->t(item.key % map->tCount);
+
+		gsl_multimin_fminimizer_set(minimizer, &func, v, step);
+		printf("%lf %lf %lf  %lf...\n",
+				gsl_multimin_fminimizer_x(minimizer)->data[0],
+				gsl_multimin_fminimizer_x(minimizer)->data[1],
+				gsl_multimin_fminimizer_x(minimizer)->data[2],
+				item.value);
+		for (int it=0; it<100 && gsl_multimin_fminimizer_iterate(minimizer) != GSL_ENOPROG; ++it) {
+			// TODO break if we have move far away (to the next cell and beyond)
+			// or return 0.0 from minFunc
+		}
+		printf("... %lf  %lf %lf %lf\n",
+				gsl_multimin_fminimizer_minimum(minimizer),
+				gsl_multimin_fminimizer_x(minimizer)->data[0],
+				gsl_multimin_fminimizer_x(minimizer)->data[1],
+				gsl_multimin_fminimizer_x(minimizer)->data[2]);
+		printf("END MINIMIZATION\n");
+
+		peak = item;
+		min = std::max(min, 0.8 * item.value); // TODO replace 0.8 with precise value
+	});
+	gsl_vector_free(v);
+	gsl_multimin_fminimizer_free(minimizer);
+	printf("END WALK\n");
+	
 	int fIndex = peak.key / map->tCount;
 	int tIndex = peak.key % map->tCount;
+	// TODO return optimized parameters
 	return TimeFreqValue{fIndex, tIndex, peak.value};
 }
+
+ */
