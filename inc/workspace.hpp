@@ -140,7 +140,7 @@ struct AtomParamsConverter {
       AtomParams params;
       params.block = block;
       params.scale = std::pow(block->scaleFactor, gsl_vector_get(x, 0));
-			params.frequency = gsl_vector_get(x, 1) * block->stepInFreq;
+			params.frequency = fabs(gsl_vector_get(x, 1)) * block->stepInFreq;
 			params.center = gsl_vector_get(x, 2) * block->stepInTime;
       return params;
 		}
@@ -165,6 +165,7 @@ public:
 			if (params.frequency < 0 || params.scale < scaleMin || params.scale > scaleMax) {
 				return 0;
 			}
+			//printf("freq=%lf scale=%lf center=%lf\n", params.frequency, params.scale, params.center);
       params.block->generator->computeValues(params.scale, params.center, envelope);
 			complex z = fourierFreq.computeNormFactor(envelope.values, params.frequency);
 			FourierFrequencyView frequencyView = fourierFreq.compute(*signal, envelope.values, samePhase, envelope.offset, params.frequency);
@@ -173,7 +174,8 @@ public:
 
 		double optimize(AtomParams &params, AtomFit *fit = nullptr)
 		{
-//			printf("-- start optimize --\n");
+			//printf("-- start optimize --\n");
+			//printf("freq=%lf scale=%lf center=%lf\n", params.frequency, params.scale, params.center);
 			GSLVector x = converter->toGSL(params);
 			std::shared_ptr<gsl_multimin_fminimizer> minimizer(
 				gsl_multimin_fminimizer_alloc(gsl_multimin_fminimizer_nmsimplex2rand, 3),
@@ -193,6 +195,7 @@ public:
 			gsl_multimin_fminimizer_set(minimizer.get(), &func, x.get(), step.get());
 			int iter = 0, status;
 			do {
+				//printf("iteration %d\n", iter);
 				if (++iter > 1000) {
 					// maybe we have at least partial accuracy
 					status = gsl_multimin_test_size(gsl_multimin_fminimizer_size(minimizer.get()), 1.0e-3);
