@@ -250,9 +250,6 @@ public:
 		if (C == 1) {
 			computeChannel(0, signal, offset, Nstart, Nend);
 		} else {
-			#ifdef _OPENMP
-			#pragma omp parallel for schedule(static,1)
-			#endif
 			for (int c=0; c<C; ++c) {
 				computeChannel(c, signal, offset, Nstart, Nend);
 			}

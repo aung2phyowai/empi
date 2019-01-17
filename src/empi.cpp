@@ -42,10 +42,8 @@ static std::vector<int> parseIntegerSubset(const std::string& string, int max) {
 }
 
 static void empi(const char* configFilePath) {
-	std::unique_ptr<Dictionary> dictionary;
 	std::unique_ptr<Decomposition> decomposition;
 	std::unique_ptr<SignalReader> reader;
-	std::shared_ptr<EnvelopeGenerator> generator;
 	DecompositionSettings settings;
 
 	// legacy configuration START /////////////////////////////////////
@@ -67,8 +65,6 @@ static void empi(const char* configFilePath) {
 		? atof(legacyConfiguration.at("maxAtomScale").c_str()) * freqSampling : INFINITY;
 	double freqMax = legacyConfiguration.has("maxAtomFrequency")
 		? atof(legacyConfiguration.at("maxAtomFrequency").c_str()) / freqSampling : INFINITY;
-
-	generator.reset( new EnvelopeGeneratorTemplate<EnvelopeGauss>() );
 
 	settings.iterationMax = atoi(legacyConfiguration.at("maximalNumberOfIterations").c_str());
 	if (settings.iterationMax <= 0) {
@@ -139,25 +135,50 @@ static void empi(const char* configFilePath) {
 
 	// legacy configuration END ///////////////////////////////////////
 
-	int epochProcessed = 0;
+	int epochsRead = 0;
+	std::vector<MultiSignal> signals;
+	std::vector<MultiChannelResult> results;
+	#pragma omp parallel
+	{
+		std::shared_ptr<EnvelopeGenerator> generator;
+		generator.reset( new EnvelopeGeneratorTemplate<EnvelopeGauss>() );
+
+		std::unique_ptr<Dictionary> dictionary;
+		std::unique_ptr<Workspace> workspace;
+		while (true) {
+			int epochIndex, sampleCount;
+			MultiSignal signal;
+			#pragma omp critical
+			{
+				signal = reader->read();
+				sampleCount = static_cast<int>(signal.channels[0].samples.size());
+				if (sampleCount) {
+					epochIndex = epochsRead++;
+					signals.push_back(signal);
+					results.resize(epochsRead);
+				}
+			}
+			if (!sampleCount) {
+				break;
+			}
+			if (!dictionary) {
+				#pragma omp critical
+				{
+					TIMER_START(prepareDictionary);
+					dictionary.reset( new Dictionary(energyError, sampleCount) );
+					dictionary->addBlocks(generator.get(), scaleMin, scaleMax, freqMax);
+					workspace.reset( new Workspace(dictionary.get(), channelCountForBuilder, samePhase, true) );
+					TIMER_STOP(prepareDictionary);
+				}
+			}
+			std::cout << "START" << '\t' << epochIndex+1 << '\t' << channelCount << '\t' << settings.iterationMax << '\t' << 100*(1-settings.residualEnergy) << std::endl;
+			results[epochIndex] = decomposition->compute(settings, workspace.get(), signal);
+		}
+	}
+
 	BookWriter writer(pathToBookFile);
-	std::unique_ptr<Workspace> workspace;
-	while (true) {
-		MultiSignal signal = reader->read();
-		int sampleCount = static_cast<int>(signal.channels[0].samples.size());
-		if (!sampleCount) {
-			break;
-		}
-		if (!dictionary) {
-			TIMER_START(prepareDictionary);
-			dictionary.reset( new Dictionary(energyError, sampleCount) );
-			dictionary->addBlocks(generator.get(), scaleMin, scaleMax, freqMax);
-			workspace.reset( new Workspace(dictionary.get(), channelCountForBuilder, samePhase, true) );
-			TIMER_STOP(prepareDictionary);
-		}
-		std::cout << "START" << '\t' << ++epochProcessed << '\t' << channelCount << '\t' << settings.iterationMax << '\t' << 100*(1-settings.residualEnergy) << std::endl;
-		MultiChannelResult result = decomposition->compute(settings, workspace.get(), signal);
-		writer.write(epochProcessed, signal, result);
+	for (int epochIndex=0; epochIndex<epochsRead; ++epochIndex) {
+		writer.write(epochIndex+1, signals[epochIndex], results[epochIndex]);
 	}
 	writer.close();
 	puts(" END");
