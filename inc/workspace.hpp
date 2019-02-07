@@ -196,7 +196,7 @@ public:
 			int iter = 0, status;
 			do {
 				//printf("iteration %d\n", iter);
-				if (++iter > 1000) {
+				if (++iter > 2000) {
 					// maybe we have at least partial accuracy
 					status = gsl_multimin_test_size(gsl_multimin_fminimizer_size(minimizer.get()), 1.0e-3);
 					if (status == GSL_SUCCESS) {
