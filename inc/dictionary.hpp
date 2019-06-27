@@ -147,7 +147,13 @@ public:
     void addBlocks(EnvelopeGenerator* generator, double scaleMin, double scaleMax, double frequencyMax = std::numeric_limits<double>::infinity())
     {
       double scaleFactor = generator->computeScaleFactor(1.0 - energyError);
-      for (double scale = scaleMin * sqrt(scaleFactor); scale <= scaleMax; scale *= scaleFactor) {
+      double dl = log(scaleFactor);
+      const double lMin = log(scaleMin);
+      const double lMax = log(scaleMax);
+      long lCount = std::lrint((lMax - lMin)/dl + 0.5) + 1;
+
+      for (int i=0; i<lCount; ++i) {
+        const double scale = exp(lMin + i*(lMax - lMin)/(lCount - 1));
         addBlock(generator, scaleFactor, scale, scaleMin, scaleMax, frequencyMax);
       }
     }
@@ -174,7 +180,7 @@ public:
       block.stepInTime = lrint(stepInTime);
       block.samplesForFFT = roundForFFT(std::max<int>(lrint(samplesForFFT), block.envelope.values.size()));
       block.stepInFreq = 1.0 / block.samplesForFFT;
-
+   
       block.atomsInTime = 1 + (sampleCount - 1) / block.stepInTime;
       block.atomsInFreq = block.samplesForFFT / 2 + 1;
       if (std::isfinite(frequencyMax) && frequencyMax > 0) {
